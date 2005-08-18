@@ -84,7 +84,6 @@ class Communication:
         debug ('will receive a file of size %d' % size)
         content = ''
         while len (content) < size:
-            debug ('received %d bytes of %d' % (len (content), size))
             chunk = self.sock.recv (size - len (content))
             if len (chunk) == 0: raise Communication.CONNECTION_CLOSED
             content += chunk
@@ -239,10 +238,10 @@ def client_cleanup ():
         del blender_files[0]
 
 # Delay before retrying when there is nothing to do
-CLIENT_WAIT_FOR_JOB = 6
+CLIENT_WAIT_FOR_JOB = 30
 
 # Delay before retrying when there has been an error
-CLIENT_WAIT_ON_ERROR = 12
+CLIENT_WAIT_ON_ERROR = 30
 
 def client_main_loop (host, port):
     debug ('client %s (md5 %s) starting' % (myfqdn, mymd5))
@@ -343,9 +342,6 @@ class BlenderJob:
         debug ('self.distributed = %s' % `self.distributed`)
 
     def needs_result (self, blendermd5, framenumber):
-        debug ('%s' % `self.still_valid ()`)
-        debug ('%s' % `framenumber not in self.done`)
-        debug ('%s' % `self.distributed.has_key (framenumber)`)
         return self.still_valid () and \
                self.blendermd5 == blendermd5 and \
                framenumber not in self.done and \
