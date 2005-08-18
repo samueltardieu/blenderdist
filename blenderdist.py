@@ -336,8 +336,13 @@ class BlenderJob:
         except: return None
 
     def assign_to_client (self, framenumber, client):
-        try: self.todo.remove (framenumber)
-        except: pass
+        try:
+            self.todo.remove (framenumber)
+            self.log ('distributing frame %d to %s' % (framenumber,
+                                                       client))
+        except:
+            self.log ('redistributing frame %d to %s' % (framenumber,
+                                                         client))
         self.distributed[framenumber] = (client, time.time())
         debug ('self.distributed = %s' % `self.distributed`)
 
@@ -347,6 +352,11 @@ class BlenderJob:
         return [(self, framenumber, date)
                 for framenumber, (client, date) in self.distributed.keys ()]
 
+    def log (self, msg):
+        date = time.asctime (time.localtime ())
+        open (self.fulljobname[:-3] + 'log', 'a').write('%s %s\n' %
+                                                        (date, msg))
+
     def needs_result (self, blendermd5, framenumber):
         return self.still_valid () and \
                self.blendermd5 == blendermd5 and \
@@ -354,6 +364,7 @@ class BlenderJob:
                self.distributed.has_key (framenumber)
 
     def store_result (self, framenumber, imagefilename, content):
+        self.log ('received rendering for frame %d' % framenumber)
         dir = os.path.join (outputdir, self.jobname)
         try: os.stat (dir)
         except: os.mkdir (dir)
@@ -383,6 +394,13 @@ def find_next_to_do ():
             debug ('removing invalid job %s' % jobname)
             del jobs[jobname]
             continue
+        # If there is a .suspend file in the same directory, disable
+        # the rendering temporarily but do not loose the state
+        try:
+            os.stat (os.path.join (jobdir, '%s.suspend' % jobname))
+            continue
+        except:
+            pass
         n = job.next_to_do ()
         if n is not None: return job, n
     # We do not have any new frame, we will retry frames in progress
