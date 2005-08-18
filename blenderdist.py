@@ -308,6 +308,7 @@ class BlenderJob:
         self.done = []
         self.jobmd5 = md5_file (self.fulljobname)
         self.blendermd5 = md5_file (self.fullblenderfilename)
+        self.log ('Starting rendering')
 
     def still_valid (self, md5 = None):
         """Check whether this entry is still valid. If a md5 is provided,
@@ -404,14 +405,17 @@ def find_next_to_do ():
         n = job.next_to_do ()
         if n is not None: return job, n
     # We do not have any new frame, we will retry frames in progress
-    # since more than 3 minutes as some clients may have crashed
+    # for more than 3 minutes as some clients may have crashed
     already = []
     for job in jobs.values ():
-        already += job.already_distributed
+        already += job.already_distributed ()
     if not already: return None
     # Sort the list so that the oldest one is first
     already.sort (lambda x, y: cmp (x[2], y[2]))
-    return already[0], already[1]
+    # If the oldest is less than 3 minutes old, do not resend it
+    oldest = already[0]
+    if time.time() - oldest[2] < 180: return None
+    return oldest[0], oldest[1]
 
 UNKNOWN_COMMAND = 'UNKNOWN_COMMAND'
 
@@ -435,7 +439,6 @@ def serve_client (comm):
             job.assign_to_client (framenumber, comm.clientfqdn)
         elif l[0] == 'REQUESTBLENDERFILE':
             content = job.content_valid (l[1], l[2])
-            debug ('len content = %d' % len (content))
             comm.send_line ('%d' % len (content))
             comm.send_content (content)
         elif l[0] == 'RESULTS':
