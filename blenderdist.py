@@ -2,6 +2,8 @@
 #
 # Distribution of blender jobs
 #
+# Author: Samuel Tardieu <sam@rfc1149.net>
+#
 # Usage: blenderdist --server PortNumber JobDir OutputDir
 #        blenderdist --client Host PortNumber
 #
@@ -153,6 +155,7 @@ def debug (msg):
 
 # My own FQDN
 myfqdn = socket.getfqdn ()
+if myfqdn == 'localhost.localdomain': myfqdn = socket.gethostname ()
 
 # My own MD5 hex digest
 mymd5 = md5_file (sys.argv[0])
@@ -233,15 +236,21 @@ def client_send_result (host, port, blenderfilename, blenderfilemd5,
 def client_cleanup ():
     while blender_files:
         debug ('cleaning file %s' % blender_files[0])
-        try: os.unlink (blender_files[0])
-        except: pass
+        try:
+            os.unlink (blender_files[0])
+        except:
+            debug ('blender file %s has already been deleted' %
+                   blender_files[0])
         del blender_files[0]
 
 # Delay before retrying when there is nothing to do
-CLIENT_WAIT_FOR_JOB = 30
+CLIENT_WAIT_FOR_JOB = 60
 
 # Delay before retrying when there has been an error
-CLIENT_WAIT_ON_ERROR = 30
+CLIENT_WAIT_ON_ERROR = 60
+
+# Delay before retrying when there has been an error while sending results
+CLIENT_WAIT_ON_RESULT_ERROR = 30
 
 def client_main_loop (host, port):
     debug ('client %s (md5 %s) starting' % (myfqdn, mymd5))
@@ -269,13 +278,13 @@ def client_main_loop (host, port):
                                                 blenderfilemd5,
                                                 frametorender,
                                                 resultfile)
-                            debug ('erasing resultfile %s' % resultfile)
+                            debug ('deleting resultfile %s' % resultfile)
                             try: os.unlink (resultfile)
                             except: pass
                             break
                         except:
                             debug ('server unavailable for results, waiting')
-                            time.sleep (CLIENT_WAIT_ON_ERROR)
+                            time.sleep (CLIENT_WAIT_ON_RESULT_ERROR)
             except:
                 # Error when talking with the server, wait some time
                 debug ('server unavailable, waiting')
@@ -351,7 +360,7 @@ class BlenderJob:
         """Return a list of (self, framenumber, time) with already
         distributed images."""
         return [(self, framenumber, date)
-                for framenumber, (client, date) in self.distributed.keys ()]
+                for framenumber, (client, date) in self.distributed.items ()]
 
     def log (self, msg):
         date = time.asctime (time.localtime ())
@@ -359,10 +368,15 @@ class BlenderJob:
                                                         (date, msg))
 
     def needs_result (self, blendermd5, framenumber):
-        return self.still_valid () and \
-               self.blendermd5 == blendermd5 and \
-               framenumber not in self.done and \
-               self.distributed.has_key (framenumber)
+        if not (self.still_valid () and self.blendermd5 == blendermd5):
+            self.log ('discarding frame %d rendering as file has changed' %
+                      framenumber)
+            return False
+        if framenumber in self.done or \
+               not self.distributed.has_key (framenumber):
+            self.log ('discarding useless frame %d' % framenumber)
+            return False
+        return True
 
     def store_result (self, framenumber, imagefilename, content):
         self.log ('received rendering for frame %d' % framenumber)
@@ -373,6 +387,8 @@ class BlenderJob:
         open(fullimagefilename, 'w').write (content)
         self.done.append (framenumber)
         del self.distributed[framenumber]
+        if len (self.done) == self.end - self.start + 1:
+            self.log ('rendering complete')
 
 def look_for_new_jobs ():
     """Look for new jobs in jobdir."""
@@ -390,6 +406,7 @@ def find_next_to_do ():
     to do or None if there is nothing to do. Also, remove invalid jobs
     if any are found."""
     look_for_new_jobs ()
+    suspended = []
     for jobname, job in jobs.items ():
         if job.still_valid () == False:
             debug ('removing invalid job %s' % jobname)
@@ -399,6 +416,7 @@ def find_next_to_do ():
         # the rendering temporarily but do not loose the state
         try:
             os.stat (os.path.join (jobdir, '%s.suspend' % jobname))
+            suspended.append (job)
             continue
         except:
             pass
@@ -408,7 +426,8 @@ def find_next_to_do ():
     # for more than 3 minutes as some clients may have crashed
     already = []
     for job in jobs.values ():
-        already += job.already_distributed ()
+        if job not in suspended:
+            already += job.already_distributed ()
     if not already: return None
     # Sort the list so that the oldest one is first
     already.sort (lambda x, y: cmp (x[2], y[2]))
