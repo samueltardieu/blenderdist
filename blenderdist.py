@@ -172,7 +172,6 @@ def client_round (host, port):
     frametorender, resultfile) if we did a succesful rendering."""
     comm = start_client (host, port)
     try:
-        debug ('sending greetings')
         comm.send_line ('HELO %s' % myfqdn)
         lastmd5, thingstodo = comm.get_line ()
         if lastmd5 != mymd5: comm.get_myself ()
@@ -197,8 +196,9 @@ def client_round (host, port):
                 open(fullblenderfilename, 'w').write(content)
             except:
                 debug ('could not write file %s' % fullblenderfilename)
-            if fullblenderfilename not in blender_files:
-                blender_files.append (fullblenderfilename)
+        if fullblenderfilename not in blender_files:
+            blender_files.append (fullblenderfilename)
+            debug ('current blender files: %s' % `blender_files`)
         comm.send_goodbye ()
         # Do the job
         rc = os.system ('blender -b %s -f %d' %
@@ -218,6 +218,9 @@ def client_send_result (host, port, blenderfilename, blenderfilemd5,
     do not want to forget to send this result."""
     comm = start_client (host, port)
     try:
+        # Send greetings and ignore results
+        comm.send_line ('HELO %s' % myfqdn)
+        comm.get_line ()
         content = open(resultfile).read()
         size = len (content)
         imagename = os.path.basename (resultfile)
@@ -234,6 +237,7 @@ def client_send_result (host, port, blenderfilename, blenderfilemd5,
         comm.shutdown ()
 
 def client_cleanup ():
+    if blender_files: debug ('cleaning up blender files')
     while blender_files:
         debug ('cleaning file %s' % blender_files[0])
         try:
@@ -367,19 +371,22 @@ class BlenderJob:
         open (self.fulljobname[:-3] + 'log', 'a').write('%s %s\n' %
                                                         (date, msg))
 
-    def needs_result (self, blendermd5, framenumber):
+    def needs_result (self, blendermd5, framenumber, client):
         if not (self.still_valid () and self.blendermd5 == blendermd5):
-            self.log ('discarding frame %d rendering as file has changed' %
-                      framenumber)
+            self.log ('discarding frame %d from %s rendering as '
+                      'file has changed' %
+                      (framenumber, client))
             return False
         if framenumber in self.done or \
                not self.distributed.has_key (framenumber):
-            self.log ('discarding useless frame %d' % framenumber)
+            self.log ('discarding duplicate frame %d from %s' %
+                      (framenumber, client))
             return False
         return True
 
-    def store_result (self, framenumber, imagefilename, content):
-        self.log ('received rendering for frame %d' % framenumber)
+    def store_result (self, framenumber, imagefilename, content, client):
+        self.log ('received rendering for frame %d from %s' %
+                  (framenumber, client))
         dir = os.path.join (outputdir, self.jobname)
         try: os.stat (dir)
         except: os.mkdir (dir)
@@ -387,6 +394,7 @@ class BlenderJob:
         open(fullimagefilename, 'w').write (content)
         self.done.append (framenumber)
         del self.distributed[framenumber]
+        debug ('self.distributed = %s' % `self.distributed`)
         if len (self.done) == self.end - self.start + 1:
             self.log ('rendering complete')
 
@@ -472,11 +480,13 @@ def serve_client (comm):
                         break
                 else:
                     raise INVALID_JOB
-                if job.needs_result (blenderfilemd5, framenumber) is False:
+                if job.needs_result (blenderfilemd5, framenumber,
+                                     comm.clientfqdn) is False:
                     raise INVALID_JOB
                 comm.send_line ('OK')
                 content = comm.get_content (size)
-                job.store_result (framenumber, imagename, content)
+                job.store_result (framenumber, imagename, content,
+                                  comm.clientfqdn)
                 comm.send_line ('THANKYOU')
             except INVALID_JOB:
                 debug ('invalid job %s (results were available)' %
