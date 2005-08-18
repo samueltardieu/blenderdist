@@ -336,10 +336,16 @@ class BlenderJob:
         except: return None
 
     def assign_to_client (self, framenumber, client):
-        assert (self.todo[0] == framenumber)
-        del self.todo[0]
+        try: self.todo.remove (framenumber)
+        except: pass
         self.distributed[framenumber] = (client, time.time())
         debug ('self.distributed = %s' % `self.distributed`)
+
+    def already_distributed (self):
+        """Return a list of (self, framenumber, time) with already
+        distributed images."""
+        return [(self, framenumber, date)
+                for framenumber, (client, date) in self.distributed.keys ()]
 
     def needs_result (self, blendermd5, framenumber):
         return self.still_valid () and \
@@ -379,7 +385,15 @@ def find_next_to_do ():
             continue
         n = job.next_to_do ()
         if n is not None: return job, n
-    return None
+    # We do not have any new frame, we will retry frames in progress
+    # since more than 3 minutes as some clients may have crashed
+    already = []
+    for job in jobs.values ():
+        already += job.already_distributed
+    if not already: return None
+    # Sort the list so that the oldest one is first
+    already.sort (lambda x, y: cmp (x[2], y[2]))
+    return already[0], already[1]
 
 UNKNOWN_COMMAND = 'UNKNOWN_COMMAND'
 
