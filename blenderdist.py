@@ -46,28 +46,40 @@
 # The "python" and "blender" executables must be in the path.
 #
 
-import cPickle, md5, os, socket, sys, time
+import cPickle, md5, os, select, socket, sys, time
+
+# Time to wait for a new client before checking our own version or for
+# client communication (to avoid being blocked)
+WAIT_FOR_CLIENT_TIMEOUT = 10
 
 class Communication:
 
     CONNECTION_CLOSED = 'CONNECTION_CLOSED'
     COMMUNICATION_ERROR = 'COMMUNICATION_ERROR'
+    TIMEOUT = 'TIMEOUT'
 
-    def __init__ (self, sock):
+    def __init__ (self, sock, timeout_factor):
         """Initialize a new communication channel."""
         self.sock = sock
         self.clientfqdn = '<unknown>'
+        self.timeout_factor = timeout_factor
 
     def send_line (self, line):
         """Send a line."""
         debug ('> ' + line)
         self.sock.send (line + '\r\n')
 
+    def recv (self, size):
+        r, w, e = select.select ([self.sock], [], [],
+                                 WAIT_FOR_CLIENT_TIMEOUT * self.timeout_factor)
+        if self.sock in r: return self.sock.recv (size)
+        raise Communication.TIMEOUT
+
     def get_line (self):
         """Get a line and return the words composing it in a tuple."""
         line = ''
         while True:
-            c = self.sock.recv (1)
+            c = self.recv (1)
             if c == '': raise Communication.CONNECTION_CLOSED
             if c == '\n': break
             if c == '\r': continue
@@ -86,7 +98,7 @@ class Communication:
         debug ('will receive a file of size %d' % size)
         content = ''
         while len (content) < size:
-            chunk = self.sock.recv (size - len (content))
+            chunk = self.recv (size - len (content))
             if len (chunk) == 0: raise Communication.CONNECTION_CLOSED
             content += chunk
         debug ('< [content]')
@@ -110,8 +122,9 @@ class Communication:
         size = int (self.get_line()[0])
         content = self.get_content (size)
         open(sys.argv[0], 'w').write (content)
-        debug ('executing the new version with args %s' % `sys.argv`)
         self.send_goodbye ()
+        self.shutdown ()
+        debug ('executing the new version')
         os.execvp ('python', ['python'] + sys.argv)
 
     def shutdown (self):
@@ -127,10 +140,14 @@ def md5_file (file):
 
 def wait_for_client (sock):
     """Make a server wait for a client and return a new instance of
-    the Communication class."""
+    the Communication class or None if there has been no client after
+    the timeout."""
     debug ('waiting for client to connect')
-    newfd, client = sock.accept ()
-    return Communication (newfd)
+    r, w, x = select.select ([sock], [], [], WAIT_FOR_CLIENT_TIMEOUT)
+    if sock in r:
+        newfd, client = sock.accept ()
+        return Communication (newfd, 1)
+    return None
 
 def start_server (port):
     """Start a server in IPv6 by default, IPv4 if it is not working and
@@ -139,15 +156,16 @@ def start_server (port):
     sock = socket.socket (socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind (('', port))
-    sock.listen (10)
+    sock.listen (50)
     return sock
 
 def start_client (host, port):
     """Start a client in IPv6 by default, IPv4 if it is not working and
     return a communication object connected to the server."""
+    debug ('connecting to server')
     sock = socket.socket (socket.AF_INET, socket.SOCK_STREAM)
     sock.connect ((host, port))
-    return Communication (sock)
+    return Communication (sock, 6)
 
 def debug (msg):
     """Print a debug message on standard error."""
@@ -157,8 +175,9 @@ def debug (msg):
 myfqdn = socket.getfqdn ()
 if myfqdn == 'localhost.localdomain': myfqdn = socket.gethostname ()
 
-# My own MD5 hex digest
-mymd5 = md5_file (sys.argv[0])
+# My own MD5 hex digest (in non-interactive mode)
+try: mymd5 = md5_file (sys.argv[0])
+except: mymd5 = '<unknown>'
 
 CHECKSUM_MISMATCH = 'CHECKSUM_MISMATCH'
 RENDERING_ERROR = 'RENDERING_ERROR'
@@ -166,14 +185,15 @@ RENDERING_ERROR = 'RENDERING_ERROR'
 # Global list of handled blender files, to be cleaned up at the end
 blender_files = []
 
-def client_round (host, port):
+def client_round (host, port, comm = None, lastmd5 = None, thingstodo = None):
     """Make a client round, which can raise any exception. Return either
     None if there was nothing to do or (blenderfilename, blenderfilemd5,
     frametorender, resultfile) if we did a succesful rendering."""
-    comm = start_client (host, port)
+    if comm is None: comm = start_client (host, port)
     try:
-        comm.send_line ('HELO %s' % myfqdn)
-        lastmd5, thingstodo = comm.get_line ()
+        if lastmd5 is None:
+            comm.send_line ('HELO %s' % myfqdn)
+            lastmd5, thingstodo = comm.get_line ()
         if lastmd5 != mymd5: comm.get_myself ()
         if thingstodo == '0':
             comm.send_goodbye ()
@@ -182,7 +202,9 @@ def client_round (host, port):
         comm.send_line ('REQUESTJOB')
         blenderfilename, blenderfilemd5, frametorender = comm.get_line ()
         frametorender = int (frametorender)
-        fullblenderfilename = os.path.join ('/tmp', blenderfilename)
+        fullblenderfilename = os.path.join ('/tmp',
+                                            '%s%d' % (blenderfilename,
+                                                      os.getpid ()))
         try:
             oldmd5 = md5_file (fullblenderfilename)
             if oldmd5 != blenderfilemd5: raise CHECKSUM_MISMATCH
@@ -220,7 +242,7 @@ def client_send_result (host, port, blenderfilename, blenderfilemd5,
     try:
         # Send greetings and ignore results
         comm.send_line ('HELO %s' % myfqdn)
-        comm.get_line ()
+        lastmd5, thingstodo = comm.get_line ()
         content = open(resultfile).read()
         size = len (content)
         imagename = os.path.basename (resultfile)
@@ -232,12 +254,14 @@ def client_send_result (host, port, blenderfilename, blenderfilemd5,
             if comm.get_line()[0] != 'THANKYOU':
                 debug ('invalid confirmation received from server')
                 raise Communication.COMMUNICATION_ERROR
-        comm.send_goodbye ()
-    finally:
+        else:
+            debug ('rendered frame is redundant or job has been cancelled')
+        return comm, lastmd5, thingstodo
+    except:
         comm.shutdown ()
+        raise
 
 def client_cleanup ():
-    if blender_files: debug ('cleaning up blender files')
     while blender_files:
         debug ('cleaning file %s' % blender_files[0])
         try:
@@ -248,7 +272,7 @@ def client_cleanup ():
         del blender_files[0]
 
 # Delay before retrying when there is nothing to do
-CLIENT_WAIT_FOR_JOB = 60
+CLIENT_WAIT_FOR_JOB = 180
 
 # Delay before retrying when there has been an error
 CLIENT_WAIT_ON_ERROR = 60
@@ -256,14 +280,24 @@ CLIENT_WAIT_ON_ERROR = 60
 # Delay before retrying when there has been an error while sending results
 CLIENT_WAIT_ON_RESULT_ERROR = 30
 
+# Delay before retrying a communication when the server is too busy
+CLIENT_WAIT_ON_SERVER_BUSY = 15
+
+def increase_backoff (backoff):
+    new = backoff * 1.1
+    if backoff > 5: return 5
+    return backoff
+
 def client_main_loop (host, port):
     debug ('client %s (md5 %s) starting' % (myfqdn, mymd5))
+    backoff = 1
+    comm, lastmd5, thingstodo = None, None, None
     try:
         while True:
             # Do a job or wait until one is available
             try:
-                debug ('looking for server')
-                r = client_round (host, port)
+                r = client_round (host, port, comm, lastmd5, thingstodo)
+                comm, lastmd5, thingstodo = None, None, None
                 if r is None:
                     # Nothing available, do some cleanup and wait some time
                     debug ('nothing to do, waiting')
@@ -277,22 +311,35 @@ def client_main_loop (host, port):
                     while True:
                         try:
                             debug ('looking for server to send result')
-                            client_send_result (host, port,
-                                                blenderfilename,
-                                                blenderfilemd5,
-                                                frametorender,
-                                                resultfile)
+                            comm, lastmd5, thingstodo = \
+                                  client_send_result (host, port,
+                                                      blenderfilename,
+                                                      blenderfilemd5,
+                                                      frametorender,
+                                                      resultfile)
+                            backoff = 1
                             debug ('deleting resultfile %s' % resultfile)
                             try: os.unlink (resultfile)
                             except: pass
                             break
+                        except Communication.TIMEOUT:
+                            debug ('server too busy to get results, '
+                                   'waiting for a while')
+                            time.sleep (CLIENT_WAIT_ON_SERVER_BUSY)
                         except:
                             debug ('server unavailable for results, waiting')
-                            time.sleep (CLIENT_WAIT_ON_RESULT_ERROR)
+                            time.sleep (CLIENT_WAIT_ON_RESULT_ERROR * backoff)
+                            backoff = increase_backoff (backoff)
+            except Communication.TIMEOUT:
+                comm, lastmd5, thingstodo = None, None, None
+                debug ('server too busy, waiting for a while')
+                time.sleep (CLIENT_WAIT_ON_SERVER_BUSY)
             except:
                 # Error when talking with the server, wait some time
+                comm, lastmd5, thingstodo = None, None, None
                 debug ('server unavailable, waiting')
-                time.sleep (CLIENT_WAIT_ON_ERROR)
+                time.sleep (CLIENT_WAIT_ON_ERROR * backoff)
+                backoff = increase_backoff (backoff)
     finally:
         client_cleanup ()
 
@@ -321,7 +368,15 @@ class BlenderJob:
         self.done = []
         self.jobmd5 = md5_file (self.fulljobname)
         self.blendermd5 = md5_file (self.fullblenderfilename)
+        self.stats = {}
         self.log ('Starting rendering')
+
+    def log_stats (self):
+        self.log ('Statistics:')
+        stats = self.stats.items ()
+        stats.sort (lambda x, y: cmp (y[1], x[1]))
+        for host, number in stats:
+            self.log ('%40s : %d frames' % (host, number))
 
     def still_valid (self, md5 = None):
         """Check whether this entry is still valid. If a md5 is provided,
@@ -364,7 +419,8 @@ class BlenderJob:
         """Return a list of (self, framenumber, time) with already
         distributed images."""
         return [(self, framenumber, date)
-                for framenumber, (client, date) in self.distributed.items ()]
+                for framenumber, (client, date) in self.distributed.items ()
+                if framenumber not in self.done]
 
     def log (self, msg):
         date = time.asctime (time.localtime ())
@@ -385,7 +441,7 @@ class BlenderJob:
         return True
 
     def store_result (self, framenumber, imagefilename, content, client):
-        self.log ('received rendering for frame %d from %s' %
+        self.log ('received rendered frame %d from %s' %
                   (framenumber, client))
         dir = os.path.join (outputdir, self.jobname)
         try: os.stat (dir)
@@ -394,9 +450,14 @@ class BlenderJob:
         open(fullimagefilename, 'w').write (content)
         self.done.append (framenumber)
         del self.distributed[framenumber]
+        if self.stats.has_key (client):
+            self.stats[client] += 1
+        else:
+            self.stats[client] = 1
         debug ('self.distributed = %s' % `self.distributed`)
         if len (self.done) == self.end - self.start + 1:
             self.log ('rendering complete')
+            self.log_stats ()
 
 def look_for_new_jobs ():
     """Look for new jobs in jobdir."""
@@ -465,6 +526,7 @@ def serve_client (comm):
                                           framenumber))
             job.assign_to_client (framenumber, comm.clientfqdn)
         elif l[0] == 'REQUESTBLENDERFILE':
+            job.log ('sending blender file to %s' % comm.clientfqdn)
             content = job.content_valid (l[1], l[2])
             comm.send_line ('%d' % len (content))
             comm.send_content (content)
@@ -484,10 +546,16 @@ def serve_client (comm):
                                      comm.clientfqdn) is False:
                     raise INVALID_JOB
                 comm.send_line ('OK')
-                content = comm.get_content (size)
-                job.store_result (framenumber, imagename, content,
-                                  comm.clientfqdn)
-                comm.send_line ('THANKYOU')
+                try:
+                    content = comm.get_content (size)
+                    job.store_result (framenumber, imagename, content,
+                                      comm.clientfqdn)
+                    comm.send_line ('THANKYOU')
+                except:
+                    job.log ('communication error when receiving '
+                             'rendered frame %d from %s' %
+                             (framenumber, comm.clientfqdn))
+                    raise
             except INVALID_JOB:
                 debug ('invalid job %s (results were available)' %
                        blenderfilename)
@@ -518,13 +586,20 @@ def server_main_loop (port):
     look_for_new_jobs ()
     listener = start_server (port)
     while True:
-        debug ('waiting for connection')
         comm = wait_for_client (listener)
+        # If my source file has changed, reexecute myself instead of
+        # sending a wrong version to the client
+        if md5_file (sys.argv[0]) != mymd5:
+            debug ('reloading new version of program')
+            if comm is not None: comm.shutdown ()
+            listener.shutdown (2)
+            os.execvp ('python', ['python'] + sys.argv)
+        if comm is None: continue
         debug ('handling client requests')
         try:
             serve_client (comm)
             debug ('client requests honored')
-        except 'foobar':
+        except:
             debug ('client communication error')
         try: comm.shutdown ()
         except: pass
