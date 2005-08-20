@@ -14,7 +14,9 @@
 #
 # Frames are rendered on the clients in /tmp (which has to be set as the
 # first output directory in the blender file). The output format must be
-# targa (*.tga).
+# targa (*.tga), jpeg or anything without extension (in this order). Be
+# careful, if there exists a file in /tmp with a name with a higher
+# priority it will wrongly be picked up.
 #
 # Commands from the client to the server are:
 #
@@ -227,9 +229,16 @@ def client_round (host, port, comm = None, lastmd5 = None, thingstodo = None):
                         (fullblenderfilename, frametorender))
         if rc != 0: raise RENDERING_ERROR
         # Check that the output filename is present
-        resultfile = os.path.join ('/tmp', '%04d.tga' % frametorender)
-        try: os.stat (resultfile)
-        except: raise RENDERING_ERROR
+        for ext in ['.tga', '.jpg', '']:
+            resultfile = os.path.join ('/tmp', '%04d%s' % (frametorender,
+                                                           ext))
+            try:
+                os.stat (resultfile)
+                break
+            except:
+                pass
+        else:
+            raise RENDERING_ERROR
         return (blenderfilename, blenderfilemd5, frametorender, resultfile)
     finally:
         comm.shutdown ()
@@ -521,6 +530,7 @@ def serve_client (comm):
         elif l[0] == 'REQUESTBLENDERDIST':
             comm.send_myself ()
         elif l[0] == 'REQUESTJOB':
+            if nexttodo is None: nexttodo = find_next_to_do ()
             job, framenumber = nexttodo
             comm.send_line ('%s %s %d' % (job.blenderfilename, job.blendermd5,
                                           framenumber))
@@ -550,6 +560,9 @@ def serve_client (comm):
                     content = comm.get_content (size)
                     job.store_result (framenumber, imagename, content,
                                       comm.clientfqdn)
+                    # The current result may have obsoleted the list
+                    # of things to do
+                    nexttodo = None
                     comm.send_line ('THANKYOU')
                 except:
                     job.log ('communication error when receiving '
