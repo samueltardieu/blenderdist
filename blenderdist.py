@@ -307,8 +307,8 @@ def unqueue (queue, fullblenderfilename):
 
 class Communication:
 
-    COMMUNICATION_ERROR = 'COMMUNICATION_ERROR'
-    TIMEOUT = 'TIMEOUT'
+    class COMMUNICATION_ERROR (Exception): pass
+    class TIMEOUT (Exception): pass
 
     def __init__ (self, sock, timeout_factor):
         """Initialize a new communication channel."""
@@ -431,8 +431,8 @@ if myfqdn == 'localhost.localdomain': myfqdn = socket.gethostname ()
 try: mymd5 = md5_file (sys.argv[0])
 except: mymd5 = '<unknown>'
 
-CHECKSUM_MISMATCH = 'CHECKSUM_MISMATCH'
-RENDERING_ERROR = 'RENDERING_ERROR'
+class CHECKSUM_MISMATCH (Exception): pass
+class RENDERING_ERROR (Exception): pass
 
 # Delay before retrying when there is nothing to do
 CLIENT_WAIT_FOR_JOB = 180
