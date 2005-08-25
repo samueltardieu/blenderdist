@@ -51,6 +51,19 @@
 import cPickle, md5, optparse, os, select, socket, sys, time, threading
 import Queue
 
+def restart ():
+    """Restart the program after all the children have terminated."""
+    debug ("waiting for children to terminate")
+    n = 0
+    try:
+        while True:
+            os.wait ()
+            n += 1
+    except:
+        pass
+    debug ("cleaned up %d child processes" % n)
+    os.execvp ('python', ['python'] + sys.argv)
+
 # Time to wait for a new client before checking our own version or for
 # client communication (to avoid being blocked)
 WAIT_FOR_CLIENT_TIMEOUT = 10
@@ -377,7 +390,7 @@ class Communication:
         self.send_goodbye ()
         self.shutdown ()
         debug ('executing the new version')
-        os.execvp ('python', ['python'] + sys.argv)
+        restart ()
 
     def shutdown (self):
         self.sock.shutdown (2)
@@ -706,7 +719,7 @@ def server_main_loop (port):
             debug ('reloading new version of program')
             if comm is not None: comm.shutdown ()
             listener.shutdown (2)
-            os.execvp ('python', ['python'] + sys.argv)
+            restart ()
         if comm is None:
             look_for_new_jobs ()
             continue
