@@ -214,10 +214,10 @@ class Client:
                 except:
                     debug ('could not write file %s' % fullblenderfilename)
                     raise
-                if fullblenderfilename not in self.blender_files:
-                    self.blender_files.append (fullblenderfilename)
-                    debug ('current blender files: %s' %
-                           `self.blender_files`)
+            if fullblenderfilename not in self.blender_files:
+                self.blender_files.append (fullblenderfilename)
+                debug ('current blender files: %s' %
+                       `self.blender_files`)
             job = fullblenderfilename, blenderfilemd5, frametorender
             self.lock.acquire ()
             # Avoid duplicating job already waiting, in progress or
