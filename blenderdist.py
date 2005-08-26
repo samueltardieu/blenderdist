@@ -30,6 +30,7 @@
 #
 #     > REQUESTJOB
 #     < blenderfilename blenderfilemd5 frametorender
+#  or < None
 #
 #     > REQUESTBLENDERFILE blenderfilename blenderfilemd5
 #     < size
@@ -48,20 +49,16 @@
 # The "python" and "blender" executables must be in the path.
 #
 
-import cPickle, md5, optparse, os, select, socket, sys, time, threading
-import Queue
+import cPickle, md5, optparse, os, select, socket, sys, time
+import thread, threading
 
 def restart ():
-    """Restart the program after all the children have terminated."""
-    debug ("waiting for children to terminate")
-    n = 0
+    """Restart the program with the same arguments."""
     try:
-        while True:
-            os.wait ()
-            n += 1
+        # Reap off any child process that may exist
+        while True: os.wait ()
     except:
         pass
-    debug ("cleaned up %d child processes" % n)
     os.execvp ('python', ['python'] + sys.argv)
 
 # Time to wait for a new client before checking our own version or for
@@ -89,8 +86,13 @@ class Client:
         (_, (host, port)) = parser.parse_args (None, self)
         self.host = host
         self.port = int (port)
-        self.jobs = Queue.Queue ()
-        self.rendered = Queue.Queue ()
+        # Queues, condition variables and their associated lock
+        self.jobs = []
+        self.rendered = []
+        self.rendering = []
+        self.lock = threading.Lock ()
+        self.jobs_condition = threading.Condition (self.lock)
+        self.rendered_condition = threading.Condition (self.lock)
         # Last time there was no job or None if there has been work to do
         self.lastnojob = None
         # Current opened communication channel
@@ -107,12 +109,13 @@ class Client:
             self.comm = start_client (self.host, self.port)
         except:
             debug ('error when connecting')
-            raise
+            raise Communication.COMMUNICATION_ERROR
 
     def teardown_connection (self):
         if self.comm is not None:
             debug ('disconnecting from server')
-            self.comm.shutdown ()
+            try: self.comm.shutdown ()
+            except: pass
             self.comm = None
         
     def ensure_connection (self):
@@ -124,7 +127,7 @@ class Client:
                 self.teardown_connection ()
                 debug ('server too busy')
                 time.sleep (CLIENT_WAIT_ON_SERVER_BUSY)
-            except:
+            except Communication.COMMUNICATION_ERROR:
                 self.teardown_connection ()
                 debug ('server communication error')
                 time.sleep (CLIENT_WAIT_ON_ERROR * self.backoff)
@@ -136,6 +139,9 @@ class Client:
         if jobstodo == '0':
             debug ('no more jobs to do')
             self.lastnojob = time.time ()
+            self.lock.acquire ()
+            if not (self.jobs or self.rendering): self.cleanup ()
+            self.lock.release ()
         else:
             self.lastnojob = None
 
@@ -146,6 +152,7 @@ class Client:
         try:
             content = open(resultfile).read()
         except:
+            debug ('error when reading result file %s' % resultfile)
             return
         while True:
             try:
@@ -167,7 +174,7 @@ class Client:
                 self.teardown_connection ()
                 debug ('server too busy')
                 time.sleep (CLIENT_WAIT_ON_SERVER_BUSY)                    
-            except:
+            except Communication.COMMUNICATION_ERROR:
                 self.teardown_connection ()
                 debug ('server communication error')
                 time.sleep (CLIENT_WAIT_ON_ERROR * self.backoff)
@@ -178,19 +185,26 @@ class Client:
             self.ensure_connection ()
             if self.latestmd5 != mymd5 and self.autoupdate:
                 self.comm.get_myself ()
+                self.restart ()
             if self.lastnojob is not None: return
             self.comm.send_line ('REQUESTJOB')
+            l = self.comm.get_line ()
+            if l == 'None': return
             blenderfilename, blenderfilemd5, frametorender = \
-                             self.comm.get_line ()
+                             l
             frametorender = int (frametorender)
             fullblenderfilename = os.path.join ('/tmp',
                                                 '%s' % blenderfilename)
             try:
-                oldmd5 = md5_file (fullblenderfilename)
+                try: oldmd5 = md5_file (fullblenderfilename)
+                except: raise CHECKSUM_MISMATCH
                 if oldmd5 != blenderfilemd5:
-                    unqueue (self.jobs, fullblenderfilename)
+                    self.lock.acquire ()
+                    self.jobs = [job for job in self.jobs
+                                 if job[0] != fullblenderfilename]
+                    self.lock.release ()
                     raise CHECKSUM_MISMATCH
-            except:
+            except CHECKSUM_MISMATCH:
                 self.comm.send_line ('REQUESTBLENDERFILE %s %s' %
                                      (blenderfilename, blenderfilemd5))
                 size = int (self.comm.get_line ()[0])
@@ -204,14 +218,24 @@ class Client:
                     self.blender_files.append (fullblenderfilename)
                     debug ('current blender files: %s' %
                            `self.blender_files`)
-            self.jobs.put ((fullblenderfilename, blenderfilemd5,
-                            frametorender))
+            job = fullblenderfilename, blenderfilemd5, frametorender
+            self.lock.acquire ()
+            # Avoid duplicating job already waiting, in progress or
+            # done
+            if job not in self.jobs and job not in self.rendering and \
+               job not in [(j[0], j[1], j[2]) for j in self.rendered]:
+                self.jobs.append (job)
+                self.jobs_condition.notify ()
+            else:
+                debug ("not adding already existing job %s:%d" %
+                       (blenderfilename, frametorender))
+            self.lock.release ()
         except Communication.TIMEOUT:
             self.teardown_connection ()
             debug ('server too busy')
             time.sleep (CLIENT_WAIT_ON_SERVER_BUSY)
             raise
-        except:
+        except Communication.COMMUNICATION_ERROR:
             self.teardown_connection ()
             debug ('server communication error')
             time.sleep (CLIENT_WAIT_ON_ERROR * self.backoff)
@@ -238,18 +262,24 @@ class Client:
             while True:
                 self.backoff = 1
                 while True:
-                    try:
-                        # Try to send any available result
-                        rendered = self.rendered.get (timeout = 5)
+                    self.lock.acquire ()
+                    if not self.rendered: self.rendered_condition.wait (5)
+                    if self.rendered:
+                        rendered = self.rendered[0]
+                        del self.rendered[0]
+                        self.lock.release ()
                         self.send_result (rendered)
-                        if self.rendered.qsize () > 0: continue
-                    except Queue.Empty:
-                        pass
-                    break
-                while self.jobs.qsize () < self.prefetch and \
-                          (self.lastnojob is None or \
-                          time.time () - self.lastnojob > \
+                    else:
+                        self.lock.release ()
+                        break
+                while True:
+                    # No need to lock for this test, we can be
+                    # approximative on jobs queue size
+                    if len (self.jobs) >= self.prefetch or \
+                          (self.lastnojob is not None and \
+                          time.time () - self.lastnojob <= \
                           CLIENT_WAIT_FOR_JOB):
+                        break
                     self.lastnojob = None
                     try:
                         self.get_job ()
@@ -267,61 +297,81 @@ class Client:
 
     def run_protected (self):
         try:
-            while True:
-                try: self.run ()
-                except: pass
-        finally:
-            # We can arrive here is the program gets killed
+            self.run ()
+        except:
             self.cleanup ()
+            debug (`sys.exc_info ()`)
+            apply (sys.excepthook, sys.exc_info ())
+            restart ()
+
+    def restart (self):
+        """Restart after all the local jobs have been terminated."""
+        debug ('executing the new version')
+        self.lock.acquire ()
+        self.jobs = [None] * self.renderers
+        self.jobs_condition.notifyAll ()
+        while self.rendering:
+            debug ("waiting for unfinished jobs: %s" % self.rendering)
+            self.rendered_condition.wait ()
+        self.lock.release ()
+        restart () 
 
 def renderer (client):
     while True:
         # Wait for a job to be available
-        job = client.jobs.get ()
-        if job is None: threading.exit ()
+        client.lock.acquire ()
+        if not client.jobs:
+            client.jobs_condition.wait ()
+        job = client.jobs[0]
+        del client.jobs[0]
+        if job is not None: client.rendering.append (job)
+        client.lock.release ()
+        if job is None: thread.exit ()
         # Render it
         fullblenderfilename, blenderfilemd5, frametorender = job
         rc = os.fork ()
-        if rc == -1:
-            debug ('fork error')
-            sys.exit (1)
-        if rc == 0:
-            os.execvp ('blender', ['blender', '-b', fullblenderfilename,
-                                   '-f', str (frametorender)])
-            
-        else:
-            (pid, status) = os.waitpid (rc, 0)
-            # Check for blender errors
-            if status != 0: continue
-            # Check that the output filename is present
-            for ext in ['.tga', '.jpg', '']:
-                resultfile = os.path.join ('/tmp', '%04d%s' % (frametorender,
-                                                               ext))
-                try:
-                    os.stat (resultfile)
-                    # Put the result in the results queue
-                    client.rendered.put ((fullblenderfilename,
-                                          blenderfilemd5,
-                                          frametorender,
-                                          resultfile))
-                except:
-                    pass
+        try:
+            if rc == -1:
+                debug ('fork error')
+                sys.exit (1)
+            if rc == 0:
+                os.execvp ('blender', ['blender', '-b', fullblenderfilename,
+                                       '-f', str (frametorender)])
 
-def unqueue (queue, fullblenderfilename):
-    """Remove any entry in the queue with fullblenderfilename in it."""
-    jobs = []
-    try:
-        job = queue.get (blocking = False)
-        if job[0] != fullblenderfilename:
-            jobs.append (job)
-    except Queue.Empty:
-        pass
-    for job in jobs: queue.put (job)
+            else:
+                (pid, status) = os.waitpid (rc, 0)
+                # Check for blender errors
+                if status != 0: continue
+                # Check that the output filename is present
+                for ext in ['.tga', '.jpg', '']:
+                    resultfile = \
+                               os.path.join ('/tmp', '%04d%s' % (frametorender,
+                                                                 ext))
+                    # Ensure that the result file exists
+                    try: os.stat (resultfile)
+                    except: continue
+                    # Put the result in the results queue
+                    client.lock.acquire ()
+                    client.rendering.remove (job)
+                    client.rendered.append ((fullblenderfilename,
+                                             blenderfilemd5,
+                                             frametorender,
+                                             resultfile))
+                    client.rendered_condition.notify ()
+                    client.lock.release ()
+                    break
+                else:
+                    debug ('could not find result file')
+                    raise RENDERING_ERROR
+        except:
+            client.lock.acquire ()
+            client.rendering.remove (job)
+            client.lock.release ()
 
 class Communication:
 
     class COMMUNICATION_ERROR (Exception): pass
-    class TIMEOUT (Exception): pass
+    class TIMEOUT (COMMUNICATION_ERROR): pass
 
     def __init__ (self, sock, timeout_factor):
         """Initialize a new communication channel."""
@@ -332,13 +382,18 @@ class Communication:
     def send_line (self, line):
         """Send a line."""
         debug ('> ' + line)
-        self.sock.send (line + '\r\n')
+        try: self.sock.send (line + '\r\n')
+        except: raise Communication.COMMUNICATION_ERROR
 
     def recv (self, size):
-        r, w, e = select.select ([self.sock], [], [],
-                                 WAIT_FOR_CLIENT_TIMEOUT * self.timeout_factor)
-        if self.sock in r: return self.sock.recv (size)
-        raise Communication.TIMEOUT
+        try:
+            r, w, e = \
+               select.select ([self.sock], [], [],
+                              WAIT_FOR_CLIENT_TIMEOUT * self.timeout_factor)
+            if self.sock in r: return self.sock.recv (size)
+            raise Communication.TIMEOUT
+        except:
+            raise Communication.COMMUNICATION_ERROR
 
     def get_line (self):
         """Get a line and return the words composing it in a tuple."""
@@ -389,8 +444,6 @@ class Communication:
         open(sys.argv[0], 'w').write (content)
         self.send_goodbye ()
         self.shutdown ()
-        debug ('executing the new version')
-        restart ()
 
     def shutdown (self):
         self.sock.shutdown (2)
@@ -643,11 +696,15 @@ def serve_client (comm):
             comm.send_myself ()
         elif l[0] == 'REQUESTJOB':
             if nexttodo is None: nexttodo = find_next_to_do ()
-            job, framenumber = nexttodo
-            comm.send_line ('%s %s %d' % (job.blenderfilename, job.blendermd5,
-                                          framenumber))
-            job.assign_to_client (framenumber, comm.clientfqdn)
-            nexttodo = None
+            if nexttodo is None:
+                comm.send_line ('None')
+            else:
+                job, framenumber = nexttodo
+                comm.send_line ('%s %s %d' %
+                                (job.blenderfilename, job.blendermd5,
+                                 framenumber))
+                job.assign_to_client (framenumber, comm.clientfqdn)
+                nexttodo = None
         elif l[0] == 'REQUESTBLENDERFILE':
             job.log ('sending blender file to %s' % comm.clientfqdn)
             content = job.content_valid (l[1], l[2])
