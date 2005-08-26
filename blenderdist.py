@@ -298,6 +298,9 @@ class Client:
     def run_protected (self):
         try:
             self.run ()
+        except MemoryError:
+            debug ('no more memory, exiting')
+            sys.exit (1)
         except:
             self.cleanup ()
             debug (`sys.exc_info ()`)
