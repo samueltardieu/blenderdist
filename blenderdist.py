@@ -68,7 +68,7 @@ WAIT_FOR_CLIENT_TIMEOUT = 10
 class Client:
 
     def __init__ (self):
-        self.prefetch = 5
+        self.prefetch = None
         self.renderers = 1
         self.autoupdate = True
         parser = optparse.OptionParser ()
@@ -79,11 +79,13 @@ class Client:
         parser.add_option ("--renderers", type="int", dest="renderers",
                            help="number of renderers (default: 1)")
         parser.add_option ("--prefetch", type="int", dest="prefetch",
-                           help="number of prefetched jobs (default: 5)")
+                           help="number of prefetched jobs")
         parser.add_option ("--no-auto-updates", action="store_false",
                            dest="autoupdate",
                            help="disable client code auto-updates")
         (_, (host, port)) = parser.parse_args (None, self)
+        if self.prefetch is None:
+            self.prefetch = 3 + 2 * self.renderers
         self.host = host
         self.port = int (port)
         # Queues, condition variables and their associated lock
