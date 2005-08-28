@@ -68,7 +68,7 @@ WAIT_FOR_CLIENT_TIMEOUT = 10
 class Client:
 
     def __init__ (self):
-        self.prefetch = 10
+        self.prefetch = 5
         self.renderers = 1
         self.autoupdate = True
         parser = optparse.OptionParser ()
@@ -102,6 +102,8 @@ class Client:
         # Backoff information
         self.backoff = 1
         self.blender_files = []
+        # Last received job
+        self.latestjob = time.time ()
 
     def open_connection (self):
         """Open a connection to the server or raise an exception."""
@@ -140,7 +142,12 @@ class Client:
             debug ('no more jobs to do')
             self.lastnojob = time.time ()
             self.lock.acquire ()
-            if not (self.jobs or self.rendering): self.cleanup ()
+            # If we have nothing to do and in progress, and the latest
+            # job is older than 6 minutes, do some cleanup of blender
+            # files
+            if not (self.jobs or self.rendering) and \
+               time.time () - self.latestjob >= 360:
+                self.cleanup ()
             self.lock.release ()
         else:
             self.lastnojob = None
@@ -187,9 +194,14 @@ class Client:
                 self.comm.get_myself ()
                 self.restart ()
             if self.lastnojob is not None: return
-            self.comm.send_line ('REQUESTJOB')
+            # Request a job and give the number of available renderers
+            available = self.renderers - len (self.jobs) - len (self.rendering)
+            if available < 0: available = 0
+            self.comm.send_line ('REQUESTJOB %d' % available)
             l = self.comm.get_line ()
-            if l == 'None': return
+            if l == 'None':
+                self.lastnojob = time.time ()
+                return
             blenderfilename, blenderfilemd5, frametorender = \
                              l
             frametorender = int (frametorender)
@@ -224,12 +236,13 @@ class Client:
             # done
             if job not in self.jobs and job not in self.rendering and \
                job not in [(j[0], j[1], j[2]) for j in self.rendered]:
-                self.jobs.append (job)
+                self.jobs.append (job)                
                 self.jobs_condition.notify ()
             else:
                 debug ("not adding already existing job %s:%d" %
                        (blenderfilename, frametorender))
             self.lock.release ()
+            self.latestjob = time.time ()
         except Communication.TIMEOUT:
             self.teardown_connection ()
             debug ('server too busy')
@@ -648,9 +661,10 @@ def look_for_new_jobs ():
                 debug ('error when adding job %s' % filename)            
 
 def find_next_to_do ():
-    """Return a (BlenderJob, framenumber) couple with the next thing
+    """Return a (BlenderJob, framenumber, already) tuple with the next thing
     to do or None if there is nothing to do. Also, remove invalid jobs
-    if any are found."""
+    if any are found. If already is True, then this frame has already
+    been distributed."""
     look_for_new_jobs ()
     suspended = []
     for jobname, job in jobs.items ():
@@ -667,9 +681,10 @@ def find_next_to_do ():
         except:
             pass
         n = job.next_to_do ()
-        if n is not None: return job, n
+        if n is not None: return job, n, False
     # We do not have any new frame, we will retry frames in progress
-    # for more than 3 minutes as some clients may have crashed
+    # for more than 3 minutes as some clients may have crashed or be
+    # very slow
     already = []
     for job in jobs.values ():
         if job not in suspended:
@@ -680,7 +695,7 @@ def find_next_to_do ():
     # If the oldest is less than 3 minutes old, do not resend it
     oldest = already[0]
     if time.time() - oldest[2] < 180: return None
-    return oldest[0], oldest[1]
+    return oldest[0], oldest[1], True
 
 UNKNOWN_COMMAND = 'UNKNOWN_COMMAND'
 
@@ -702,12 +717,17 @@ def serve_client (comm):
             if nexttodo is None:
                 comm.send_line ('None')
             else:
-                job, framenumber = nexttodo
-                comm.send_line ('%s %s %d' %
-                                (job.blenderfilename, job.blendermd5,
-                                 framenumber))
-                job.assign_to_client (framenumber, comm.clientfqdn)
-                nexttodo = None
+                job, framenumber, already = nexttodo
+                if already and l[1] == '0':
+                    # Do not redistribute work to busy workers
+                    debug ('not distributing work to busy worker')
+                    comm.send_line ('None')
+                else:
+                    comm.send_line ('%s %s %d' %
+                                    (job.blenderfilename, job.blendermd5,
+                                     framenumber))
+                    job.assign_to_client (framenumber, comm.clientfqdn)
+                    nexttodo = None
         elif l[0] == 'REQUESTBLENDERFILE':
             job.log ('sending blender file to %s' % comm.clientfqdn)
             content = job.content_valid (l[1], l[2])
