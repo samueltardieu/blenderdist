@@ -22,7 +22,8 @@
 #
 #     > HELO fqdnofclient
 #     < lastblenderdistmd5 thingstodo
-# thingstodo is 1 if there are jobs, 0 otherwise
+# thingstodo is 1 if there are jobs, 0 otherwise. If it is STOPPING, the
+# client may stop
 #
 #     > REQUESTBLENDERDIST
 #     < size
@@ -49,8 +50,11 @@
 # The "python" and "blender" executables must be in the path.
 #
 
-import cPickle, md5, optparse, os, select, socket, sys, time
+import cPickle, md5, optparse, os, select, signal, socket, sys, time
 import thread, threading
+
+# Set to True to stop clients because everything is permanently terminated
+STOP_CLIENTS = True
 
 def restart ():
     """Restart the program with the same arguments."""
@@ -140,6 +144,10 @@ class Client:
     def helo_exchange (self):
         self.comm.send_line ('HELO %s' % myfqdn)
         self.latestmd5, jobstodo = self.comm.get_line ()
+        if jobstodo == 'STOPPING':
+            debug ('exiting upon server request')
+            self.cleanup ()
+            os.kill (os.getpid (), signal.SIGKILL)
         if jobstodo == '0':
             debug ('no more jobs to do')
             self.lastnojob = time.time ()
@@ -709,9 +717,10 @@ def serve_client (comm):
         if l[0] == 'HELO':
             comm.clientfqdn = l[1]
             nexttodo = find_next_to_do ()
-            if nexttodo: ntd = 1
-            else: ntd = 0
-            comm.send_line ('%s %d' % (mymd5, ntd))
+            if nexttodo: ntd = '1'
+            else: ntd = '0'
+            if STOP_CLIENTS: ntd = 'STOPPING'
+            comm.send_line ('%s %s' % (mymd5, ntd))
         elif l[0] == 'REQUESTBLENDERDIST':
             comm.send_myself ()
         elif l[0] == 'REQUESTJOB':
