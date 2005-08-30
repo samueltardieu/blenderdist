@@ -49,12 +49,14 @@
 #
 # The "python" and "blender" executables must be in the path.
 #
+# This script has been written by Samuel Tardieu <sam@rfc1149.net> then
+# placed in the public domain.
 
 import cPickle, md5, optparse, os, select, signal, socket, sys, time
 import thread, threading
 
 # Set to True to stop clients because everything is permanently terminated
-STOP_CLIENTS = True
+STOP_CLIENTS = False
 
 def restart ():
     """Restart the program with the same arguments."""
