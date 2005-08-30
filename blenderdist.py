@@ -3,6 +3,7 @@
 # Distribution of blender jobs
 #
 # Author: Samuel Tardieu <sam@rfc1149.net>
+# Licence: public domain
 #
 # Usage: blenderdist --server PortNumber JobDir OutputDir
 #        blenderdist --client Host PortNumber
@@ -48,9 +49,6 @@
 # MD5 digests are sent in hexadecimal format.
 #
 # The "python" and "blender" executables must be in the path.
-#
-# This script has been written by Samuel Tardieu <sam@rfc1149.net> then
-# placed in the public domain.
 
 import cPickle, md5, optparse, os, select, signal, socket, sys, time
 import thread, threading
