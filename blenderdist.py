@@ -5,13 +5,15 @@
 # Author: Samuel Tardieu <sam@rfc1149.net>
 # Licence: public domain
 #
-# Usage: blenderdist --server PortNumber JobDir OutputDir
-#        blenderdist --client Host PortNumber
+# Usage: blenderdist.py --server PortNumber JobDir OutputDir
+#        blenderdist.py --client Host PortNumber [options]
 #
 # A job file contains: (one on each line)
 #   - the blender file name with the full path
 #   - the starting frame to render
 #   - the ending frame to render
+#
+# Use blenderdist.py --client --help for more information on client options
 #
 # Frames are rendered on the clients in /tmp (which has to be set as the
 # first output directory in the blender file). The output format must be
